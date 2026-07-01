@@ -1,6 +1,6 @@
 # PVDeg Methodology and Feature Analysis
 
-This document provides a detailed breakdown of the mathematical models and physical equations used in PVDeg, as well as clarifications on specific feature requests.
+This document provides a detailed breakdown of the mathematical models and physical equations used in PVDeg, as well as clarifications on specific feature requests and modeling scopes.
 
 ## I. Degradation Methodology: Bottom-Up Traceback
 
@@ -17,12 +17,14 @@ This model simulates the progression of Light and elevated Temperature Induced D
     *(Source: `pvdeg/letid.py` -> `calc_letid_outdoors`, `calc_energy_loss`)*
 
 #### **Level 2: Device Physics (Electrical Parameters)**
-*   **Open Circuit Voltage ($V_{oc}$):** Derived from carrier lifetime ($\tau$) using the Gray model for saturation current density ($J_0$).
+*   **Open Circuit Voltage ($V_{oc}$):** Derived from carrier lifetime ($\tau$) using the Gray model for saturation current density ($J_0$):
     $$V_{oc} = \frac{kT}{q} \ln\left(\frac{J_{sc}}{J_0}\right)$$
-*   **Short Circuit Current ($J_{sc}$):** Calculated by integrating the Collection Probability ($CP$) and the Optical Generation Profile ($G(z)$) through the wafer depth ($z$).
-    $$J_{sc} = q \int CP(z, \tau) \cdot G(z) dz$$
-*   **Fill Factor ($FF$):** Estimated using Green’s empirical expression based on $V_{oc}$.
-    *(Source: `pvdeg/collection.py` -> `calculate_jsc_from_tau_cp`, `pvdeg/letid.py` -> `calc_voc_from_tau`)*
+*   **Short Circuit Current ($J_{sc}$):** Calculated by integrating the Collection Probability ($CP$) and the Optical Generation Profile ($G(z)$) through the wafer depth ($z$):
+    $$J_{sc} = q \int_{0}^{W} G(z) \cdot CP(z, \tau) dz$$
+*   **Fill Factor ($FF$):** Estimated using **Green’s empirical expression** based on normalized open-circuit voltage $v$:
+    $$v = \frac{V_{oc}}{nkT/q}$$
+    $$FF = \frac{v - \ln(v + 0.72)}{v + 1}$$
+    *(Source: `pvdeg/collection.py` -> `calculate_jsc_from_tau_cp`, `pvdeg/letid.py` -> `calc_voc_from_tau`, `ff_green`)*
 
 #### **Level 3: Defect Kinetics (3-State Model)**
 The effective carrier lifetime ($\tau$) is determined by the fraction of defects in recombination-active **State B ($N_B$)**.
@@ -42,9 +44,11 @@ The effective carrier lifetime ($\tau$) is determined by the fraction of defects
     *(Source: `pvdeg/letid.py` -> `k_ij`, `carrier_factor`, constants from `DegradationDatabase.json`)*
 
 #### **Level 5: Physical Inputs**
-*   **Cell Temperature ($T$):** Calculated via `pvlib` models (SAPM, Pvsyst, etc.) using ambient temperature, wind speed, and POA irradiance.
-*   **Excess Carrier Density ($\Delta n$):** Calculated via carrier diffusion equations based on the operational **Injection level**.
-*   **Plane-of-Array (POA) Irradiance:** Derived from DNI, GHI, and DHI weather components.
+*   **Cell Temperature ($T$):** Calculated via `pvlib` models (e.g., SAPM) using ambient temperature ($T_{amb}$), wind speed ($WS$), and POA irradiance ($G_{poa}$):
+    $$T_{cell} = T_{amb} + G_{poa} \cdot \exp(a + b \cdot WS) + \frac{G_{poa}}{G_0} \cdot \Delta T$$
+*   **Excess Carrier Density ($\Delta n$):** Determined by solving the steady-state diffusion equation for a given injection level.
+*   **Plane-of-Array (POA) Irradiance:** Derived from weather components:
+    $$G_{poa} = G_{beam} \cdot \cos(AOI) + G_{sky\_diffuse} + G_{ground\_diffuse}$$
     *(Source: NSRDB/PVGIS weather data, `pvdeg/temperature.py`, `pvdeg/spectral.py`)*
 
 ---
@@ -54,14 +58,14 @@ This model relates field degradation to accelerated chamber testing.
 
 #### **Level 1: Final Outputs**
 *   **Acceleration Factor ($AF$):**
-    $$AF = \frac{\text{Rate}_{chamber}}{\text{Avg}(\text{Rate}_{env})}$$
+    $$AF = \frac{I_{chamber}^p}{\frac{1}{n} \sum_{t=1}^n \left( POA(t)^p \cdot T_f^{\frac{T(t) - T_{chamber}}{10}} \right)}$$
 *   **Environment Characterization ($I_{wa}$):** The irradiance level required in a controlled environment to simulate field degradation.
     $$I_{wa} = \left(\frac{\sum (POA^p \cdot T_f^{\frac{T - T_{eq}}{10}})}{n}\right)^{\frac{1}{p}}$$
     *(Source: `pvdeg/degradation.py` -> `vantHoff_deg`, `IwaVantHoff`)*
 
 #### **Level 2: Degradation Rate Equation**
 Assumes degradation is driven by power-law irradiance and exponential temperature:
-$$\text{Rate} \propto (POA)^p \cdot T_f^{\frac{T - T_{ref}}{10}}$$
+$$\text{Rate}(t) \propto POA(t)^p \cdot T_f^{\frac{T(t) - T_{ref}}{10}}$$
 *   $p$: Irradiance fit parameter (default 0.5).
 *   $T_f$: Thermal acceleration factor for every 10°C (default 1.41).
 
@@ -72,6 +76,27 @@ $$T_{eq} = \frac{10}{\ln(T_f)} \cdot \ln\left(\frac{\sum T_f^{\frac{T}{10}}}{n}\
 #### **Level 4: Physical Inputs**
 *   **Operating Temperature ($T$):** Calculated via `pvdeg/temperature.py`.
 *   **POA Irradiance:** Calculated from weather data and module orientation.
+
+---
+
+### 3. Monte Carlo Simulations with Arrhenius Models
+
+PVDeg implements a Monte Carlo framework to propagate parameter uncertainties through degradation models.
+
+#### **Correlated Sampling Methodology**
+1.  **Statistical Definition:** Mean ($\mu$) and standard deviation ($\sigma$) are defined for each kinetic parameter (e.g., $E_a$, $R_0$).
+2.  **Correlation Matrix ($C$):** Capture dependencies between parameters.
+3.  **Cholesky Decomposition:** The matrix $C$ is decomposed into $L$ such that $C = LL^T$.
+4.  **Sample Generation:**
+    *   Generate independent standard normal variables $Z \sim N(0, 1)$.
+    *   Apply correlation: $Y = L Z$.
+    *   Scale and shift to physical units: $X = \mu + \sigma \cdot Y$.
+
+#### **Simulation Pipeline**
+Correlated samples are applied to the Arrhenius degradation function:
+$$D_i = R_{0,i} \int [RH(t)]^n \cdot \exp\left(\frac{-E_{a,i}}{RT(t)}\right) [G(t)]^p dt$$
+The resulting distribution of $D$ allows for uncertainty quantification and reliability assessment.
+*(Source: `pvdeg/montecarlo.py` -> `generateCorrelatedSamples`, `simulate`)*
 
 ---
 
